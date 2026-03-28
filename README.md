@@ -16,7 +16,7 @@ A lightweight browser extension that overlays real-time API usage analytics when
 
 1. Open Chrome (or Chromium-based browser) and go to `chrome://extensions`.
 2. Enable **Developer mode**.
-3. Click **Load unpacked** and select `freelance/plugins/cursor-usage-plugin`.
+3. Click **Load unpacked** and select folder containing plugin.
 4. Visit `https://cursor.com/dashboard/usage`.
 
 The overlay should appear automatically when the URL matches the configured pattern.
