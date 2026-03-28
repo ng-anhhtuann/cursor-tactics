@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Cursor Usage Tracker Options</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+      }
+      body {
+        font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+        margin: 0;
+        padding: 24px;
+        background: #0f1115;
+        color: #e6e9ee;
+      }
+      main {
+        max-width: 720px;
+        margin: 0 auto;
+        display: flex;
+        flex-direction: column;
+        gap: 18px;
+      }
+      h1 {
+        font-size: 20px;
+        margin: 0;
+      }
+      p {
+        margin: 0;
+        color: rgba(230, 233, 238, 0.7);
+      }
+      .card {
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 12px;
+        padding: 16px;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+      label {
+        font-size: 13px;
+        font-weight: 600;
+      }
+      input,
+      textarea {
+        width: 100%;
+        border-radius: 8px;
+        border: 1px solid rgba(255, 255, 255, 0.16);
+        padding: 8px 10px;
+        background: rgba(15, 17, 21, 0.7);
+        color: inherit;
+        font-size: 13px;
+      }
+      textarea {
+        min-height: 140px;
+        resize: vertical;
+      }
+      .row {
+        display: flex;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+      .actions {
+        display: flex;
+        gap: 10px;
+      }
+      button {
+        border-radius: 8px;
+        border: 1px solid rgba(255, 255, 255, 0.16);
+        background: rgba(255, 255, 255, 0.06);
+        color: inherit;
+        padding: 8px 12px;
+        font-size: 13px;
+        cursor: pointer;
+      }
+      button:hover {
+        background: rgba(255, 255, 255, 0.12);
+      }
+      .status {
+        font-size: 12px;
+        color: rgba(230, 233, 238, 0.75);
+      }
+      .hint {
+        font-size: 12px;
+        color: rgba(230, 233, 238, 0.6);
+      }
+      .error {
+        color: #ff8a8a;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>Cursor Usage Tracker</h1>
+        <p>Configure when the overlay activates and how plan usage is calculated.</p>
+      </header>
+
+      <section class="card">
+        <label for="targetUrl">Target URL pattern</label>
+        <input id="targetUrl" type="text" />
+        <div class="hint">
+          Use * as a wildcard. Example: https://cursor.com/dashboard/usage*
+        </div>
+      </section>
+
+      <section class="card">
+        <label for="planLimit">Plan token limit</label>
+        <input id="planLimit" type="number" min="0" step="1" placeholder="e.g. 10000000" />
+        <div class="hint">
+          Leave blank to hide plan usage metrics.
+        </div>
+      </section>
+
+      <section class="card">
+        <label for="pricing">Model pricing (USD per 1M tokens)</label>
+        <textarea id="pricing"></textarea>
+        <div class="hint">
+          Provide a JSON object keyed by model name. Example:
+          {"gpt-4": 30, "gpt-3.5": 1, "claude-4.6-opus-high-thinking": 15}
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="actions">
+          <button id="save" type="button">Save settings</button>
+          <button id="reset" type="button">Reset defaults</button>
+        </div>
+        <div class="status" id="status"></div>
+      </section>
+    </main>
+    <script src="options.js"></script>
+  </body>
+</html>

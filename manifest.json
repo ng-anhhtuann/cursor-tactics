@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "Cursor Usage Tracker",
+  "version": "0.1.0",
+  "description": "Tracks and displays API usage statistics on the Cursor usage dashboard.",
+  "permissions": ["storage"],
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "css": ["styles.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "options_page": "options.html",
+  "action": {
+    "default_title": "Cursor Usage Tracker"
+  }
+}
