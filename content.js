@@ -13,16 +13,99 @@
     records: [],
     recordIds: {},
     lastUpdated: 0,
-    rangeText: ""
+    rangeText: "",
+    planName: ""
   };
+
+  const PLAN_API_LIMIT_USD = {
+    "pro": 20,
+    "pro plus": 70,
+    "ultra": 400
+  };
+
+  const MODEL_DEFINITIONS = [
+    {
+      id: "claude-opus-4-6",
+      displayName: "Claude 4.6 Opus",
+      contextTokens: 200000,
+      maxTokens: 1000000,
+      pool: "api",
+      pricing: { input: 5, output: 25 },
+      aliases: ["claude-4.6-opus", "claude-opus-4-6"]
+    },
+    {
+      id: "claude-4-6-sonnet",
+      displayName: "Claude 4.6 Sonnet",
+      contextTokens: 200000,
+      maxTokens: 1000000,
+      pool: "api",
+      pricing: { input: 3, output: 15 },
+      aliases: ["claude-4.6-sonnet", "claude-4-6-sonnet"]
+    },
+    {
+      id: "composer-2",
+      displayName: "Composer 2",
+      contextTokens: 200000,
+      maxTokens: null,
+      pool: "auto",
+      pricing: { input: 0.5, output: 2.5 },
+      aliases: ["composer-2"]
+    },
+    {
+      id: "gemini-3-1-pro",
+      displayName: "Gemini 3.1 Pro",
+      contextTokens: 200000,
+      maxTokens: 1000000,
+      pool: "api",
+      pricing: { input: 2, output: 12 },
+      aliases: ["gemini-3.1-pro"]
+    },
+    {
+      id: "gpt-5-3-codex",
+      displayName: "GPT-5.3 Codex",
+      contextTokens: 272000,
+      maxTokens: null,
+      pool: "api",
+      pricing: { input: 1.75, output: 14 },
+      aliases: ["gpt-5.3-codex", "gpt-5-3-codex"]
+    },
+    {
+      id: "gpt-5-4",
+      displayName: "GPT-5.4",
+      contextTokens: 272000,
+      maxTokens: 1000000,
+      pool: "api",
+      pricing: { input: 2.5, output: 15 },
+      aliases: ["gpt-5.4", "gpt-5-4"]
+    },
+    {
+      id: "grok-4-20",
+      displayName: "Grok 4.20",
+      contextTokens: 200000,
+      maxTokens: 2000000,
+      pool: "api",
+      pricing: { input: 2, output: 6 },
+      aliases: ["grok-4-20"]
+    },
+    {
+      id: "auto",
+      displayName: "Auto",
+      contextTokens: null,
+      maxTokens: null,
+      pool: "auto",
+      pricing: { input: 1.25, output: 6 },
+      aliases: ["auto"]
+    }
+  ];
 
   let settings = { ...DEFAULT_SETTINGS };
   let data = { ...DEFAULT_DATA };
   let overlay = null;
   let ui = null;
   let observer = null;
+  let tableObserver = null;
   let refreshTimer = null;
-  let pollTimer = null;
+  let activationToken = 0;
   let currentUrl = location.href;
   const sessionRecordIds = new Set();
   const sessionStartedAt = Date.now();
@@ -86,14 +169,22 @@
     if (!matchesPattern(location.href, settings.targetUrlPattern)) {
       teardownOverlay();
       disconnectObserver();
-      stopPolling();
       return;
     }
 
+    const token = ++activationToken;
     ensureOverlay();
-    await refreshData();
+    await waitForDomReady();
+    if (token !== activationToken) return;
+
+    const tableReady = await waitForUsageTable();
+    if (token !== activationToken) return;
+    if (tableReady) {
+      await refreshData();
+    } else {
+      showStatus("Waiting for usage table…");
+    }
     connectObserver();
-    startPolling();
   }
 
   function ensureOverlay() {
@@ -153,7 +244,6 @@
           <div class="cut-timeline" data-cut-timeline></div>
         </div>
         <div class="cut-section cut-actions-row">
-          <button class="cut-button" data-action="refresh" type="button">Refresh</button>
           <button class="cut-button" data-action="export-json" type="button">Export JSON</button>
           <button class="cut-button" data-action="export-csv" type="button">Export CSV</button>
           <button class="cut-button cut-button-danger" data-action="reset" type="button">Reset</button>
@@ -206,11 +296,6 @@
       return;
     }
 
-    if (action === "refresh") {
-      refreshData();
-      return;
-    }
-
     if (action === "export-json") {
       exportJson();
       return;
@@ -234,10 +319,14 @@
       return;
     }
 
-    data.rangeText = parsed.rangeText || "";
+    data.rangeText = extractRangeText(parsed.rangeText);
+    const detectedPlanName = detectPlanName(parsed.records);
+    if (detectedPlanName) {
+      data.planName = detectedPlanName;
+    }
     const didUpdate = mergeRecords(parsed.records);
     data.lastUpdated = Date.now();
-    if (didUpdate) {
+    if (didUpdate || detectedPlanName) {
       await storageSet(DATA_KEY, data);
     }
     render();
@@ -247,18 +336,35 @@
     disconnectObserver();
     const table = findUsageTable();
     const rowGroup = table?.querySelector('[role="rowgroup"]');
-    if (!rowGroup) return;
+    if (!table || !rowGroup) {
+      watchForTable();
+      return;
+    }
 
     observer = new MutationObserver(() => {
       scheduleRefresh();
     });
     observer.observe(rowGroup, { childList: true, subtree: true });
+
+    tableObserver = new MutationObserver(() => {
+      const freshTable = findUsageTable();
+      const freshRowGroup = freshTable?.querySelector('[role="rowgroup"]');
+      if (freshRowGroup && freshRowGroup !== rowGroup) {
+        connectObserver();
+        scheduleRefresh();
+      }
+    });
+    tableObserver.observe(table, { childList: true, subtree: true });
   }
 
   function disconnectObserver() {
     if (observer) {
       observer.disconnect();
       observer = null;
+    }
+    if (tableObserver) {
+      tableObserver.disconnect();
+      tableObserver = null;
     }
   }
 
@@ -270,33 +376,66 @@
     }, delay);
   }
 
-  function startPolling() {
-    stopPolling();
-    pollTimer = setInterval(() => {
-      refreshData();
-    }, 15000);
+  function waitForDomReady() {
+    if (document.readyState === "loading") {
+      return new Promise((resolve) => {
+        document.addEventListener("DOMContentLoaded", resolve, { once: true });
+      });
+    }
+    return Promise.resolve();
   }
 
-  function stopPolling() {
-    if (pollTimer) {
-      clearInterval(pollTimer);
-      pollTimer = null;
-    }
+  function waitForUsageTable(timeoutMs = 15000) {
+    if (findUsageTable()) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      const target = document.body || document.documentElement;
+      if (!target) {
+        resolve(false);
+        return;
+      }
+      const tempObserver = new MutationObserver(() => {
+        if (findUsageTable()) {
+          tempObserver.disconnect();
+          resolve(true);
+        }
+      });
+      tempObserver.observe(target, { childList: true, subtree: true });
+      if (timeoutMs) {
+        setTimeout(() => {
+          tempObserver.disconnect();
+          resolve(Boolean(findUsageTable()));
+        }, timeoutMs);
+      }
+    });
+  }
+
+  function watchForTable() {
+    if (tableObserver) return;
+    const target = document.body || document.documentElement;
+    if (!target) return;
+    tableObserver = new MutationObserver(() => {
+      if (findUsageTable()) {
+        connectObserver();
+        scheduleRefresh(0);
+      }
+    });
+    tableObserver.observe(target, { childList: true, subtree: true });
   }
 
   function render() {
     if (!ui) return;
-    const stats = computeStats(data.records, settings);
+    const stats = computeStats(data.records, settings, data.planName);
     const sessionStats = computeStats(
       data.records.filter((record) => sessionRecordIds.has(record.id)),
-      settings
+      settings,
+      data.planName
     );
 
     const rangeText = data.rangeText ? data.rangeText.trim() : "";
     ui.range.textContent = rangeText || "Current range";
 
     ui.totalTokens.textContent = formatCompactNumber(stats.totals.tokens);
-    ui.totalCost.textContent = formatCost(stats.totals.cost);
+    ui.totalCost.textContent = formatCostLabel(stats.totals);
     ui.totalRequests.textContent = formatNumber(stats.totals.requests);
     ui.avgTokens.textContent = formatNumber(Math.round(stats.avgTokens || 0));
     ui.errorRate.textContent = `${Math.round((stats.errorRate || 0) * 100)}%`;
@@ -319,28 +458,74 @@
     if (!plan) {
       const note = document.createElement("div");
       note.className = "cut-muted";
-      note.textContent = "Set a plan token limit in Options to track quota.";
+      note.textContent = "Plan usage limits not detected yet.";
       ui.plan.appendChild(note);
       return;
     }
 
-    const percent = Math.min(Math.max(plan.percent || 0, 0), 1);
-    const row = document.createElement("div");
-    row.className = "cut-plan-row";
-    row.innerHTML = `
-      <div class="cut-plan-bar">
-        <div class="cut-plan-fill" style="width:${Math.round(percent * 100)}%"></div>
-      </div>
-      <div class="cut-plan-meta">
-        <span>${formatCompactNumber(plan.used)} used</span>
-        <span>${formatCompactNumber(plan.remainingTokens)} remaining</span>
-      </div>
-      <div class="cut-plan-meta">
-        <span>${Math.round(percent * 100)}% of ${formatCompactNumber(plan.limit)}</span>
-        <span>${formatRemainingRequests(plan.remainingRequests)}</span>
-      </div>
-    `;
-    ui.plan.appendChild(row);
+    const block = document.createElement("div");
+    block.className = "cut-plan-row";
+
+    if (plan.mode === "tokens") {
+      const percent = Math.min(Math.max(plan.percent || 0, 0), 1);
+      block.innerHTML = `
+        <div class="cut-plan-title">${plan.planName ? `${plan.planName} token limit` : "Token limit"}</div>
+        <div class="cut-plan-bar">
+          <div class="cut-plan-fill" style="width:${Math.round(percent * 100)}%"></div>
+        </div>
+        <div class="cut-plan-meta">
+          <span>${formatCompactNumber(plan.usedTokens)} used</span>
+          <span>${formatCompactNumber(plan.remainingTokens)} remaining</span>
+        </div>
+        <div class="cut-plan-meta">
+          <span>${Math.round(percent * 100)}% of ${formatCompactNumber(plan.limitTokens)}</span>
+          <span>${formatRemainingRequests(plan.remainingRequests)}</span>
+        </div>
+        <div class="cut-muted">Token limit override enabled.</div>
+      `;
+    } else if (plan.mode === "usd") {
+      const percent = Math.min(Math.max(plan.percent || 0, 0), 1);
+      block.innerHTML = `
+        <div class="cut-plan-title">${plan.planName ? `${plan.planName} API pool` : "API pool"}</div>
+        <div class="cut-plan-bar">
+          <div class="cut-plan-fill" style="width:${Math.round(percent * 100)}%"></div>
+        </div>
+        <div class="cut-plan-meta">
+          <span>${formatCostValue(plan.apiUsedUsd, plan.apiHasEstimated)}</span>
+          <span>${formatCost(plan.apiRemainingUsd)} remaining</span>
+        </div>
+        <div class="cut-plan-meta">
+          <span>${Math.round(percent * 100)}% of ${formatCost(plan.apiLimitUsd)}</span>
+          <span>${formatCompactNumber(plan.apiTokens)} tokens</span>
+        </div>
+        ${plan.apiHasEstimated ? '<div class="cut-muted">Estimated cost based on model pricing.</div>' : ""}
+      `;
+    } else {
+      block.innerHTML = `
+        <div class="cut-plan-title">${plan.planName ? `${plan.planName} API pool` : "API pool"}</div>
+        <div class="cut-plan-meta">
+          <span>${formatCompactNumber(plan.apiTokens)} tokens</span>
+          <span>${formatCostValue(plan.apiUsedUsd, plan.apiHasEstimated)}</span>
+        </div>
+        <div class="cut-muted">Plan limit not available from the page.</div>
+      `;
+    }
+
+    ui.plan.appendChild(block);
+
+    if (plan.autoTokens) {
+      const autoBlock = document.createElement("div");
+      autoBlock.className = "cut-plan-row cut-plan-secondary";
+      autoBlock.innerHTML = `
+        <div class="cut-plan-title">Auto + Composer pool</div>
+        <div class="cut-plan-meta">
+          <span>${formatCompactNumber(plan.autoTokens)} tokens</span>
+          <span>${formatCostValue(plan.autoEstimatedCost, plan.autoHasEstimated)}</span>
+        </div>
+        <div class="cut-muted">Included usage limit not specified.</div>
+      `;
+      ui.plan.appendChild(autoBlock);
+    }
   }
 
   function renderSession(sessionStats) {
@@ -353,7 +538,7 @@
       <div class="cut-session-meta">
         <span>${formatCompactNumber(sessionStats.totals.tokens)} tokens</span>
         <span>${formatNumber(sessionStats.totals.requests)} requests</span>
-        <span>${formatCost(sessionStats.totals.cost)}</span>
+        <span>${formatCostLabel(sessionStats.totals)}</span>
       </div>
       <div class="cut-muted">Session started ${formatRelativeTime(sessionStartedAt)}.</div>
     `;
@@ -380,25 +565,37 @@
       <div>Tokens</div>
       <div>Req</div>
       <div>Avg</div>
-      <div>Cost</div>
+      <div>Max/Limit</div>
     `;
     ui.models.appendChild(header);
 
     entries.forEach(([model, stat]) => {
       const avgTokens = stat.requests ? stat.tokens / stat.requests : 0;
-      const costLabel = stat.cost > 0
-        ? formatCost(stat.cost)
-        : stat.estimatedCost != null
-          ? `~${formatCost(stat.estimatedCost)}`
-          : "Included";
+      const limitText = stat.limitTokens
+        ? `${formatCompactNumber(stat.maxRequestTokens)} / ${formatCompactNumber(stat.limitTokens)}`
+        : "n/a";
+      const rawPercent = stat.limitTokens
+        ? stat.maxRequestTokens / stat.limitTokens
+        : null;
+      const percent = rawPercent != null ? Math.round(rawPercent * 100) : null;
+      const barPercent = rawPercent != null ? Math.min(rawPercent, 1) * 100 : 0;
+      const remaining = stat.limitTokens
+        ? formatCompactNumber(stat.remainingTokens)
+        : null;
       const row = document.createElement("div");
       row.className = "cut-table-row";
       row.innerHTML = `
-        <div class="cut-truncate" title="${escapeHtml(model)}">${escapeHtml(model)}</div>
+        <div class="cut-truncate" title="${escapeHtml(stat.displayName || model)}">${escapeHtml(stat.displayName || model)}</div>
         <div>${formatCompactNumber(stat.tokens)}</div>
         <div>${formatNumber(stat.requests)}</div>
         <div>${formatNumber(Math.round(avgTokens))}</div>
-        <div>${costLabel}</div>
+        <div class="cut-limit-cell">
+          <div class="cut-limit-text">${limitText}${percent != null ? ` (${percent}%)` : ""}</div>
+          ${stat.limitTokens
+            ? `<div class="cut-limit-remaining">Remaining ${remaining}</div>
+               <div class="cut-limit-bar"><div class="cut-limit-fill" style="width:${barPercent}%"></div></div>`
+            : `<div class="cut-muted">No model limit data.</div>`}
+        </div>
       `;
       ui.models.appendChild(row);
     });
@@ -486,8 +683,16 @@
     const cost = parseCost(costText);
     const timestampMs = Date.parse(dateTitle);
 
-    const isIncluded = /included/i.test(typeTitle || typeLabel || "");
-    const isError = /error|failed|cancel/i.test(typeTitle || typeLabel || "");
+    const typeValue = typeTitle || typeLabel || "";
+    const isIncluded = /included/i.test(typeValue);
+    const isError = /error|failed|cancel/i.test(typeValue);
+    const planName = extractPlanName(typeValue);
+
+    const modelInfo = resolveModelDefinition(model);
+    const modelKey = modelInfo?.id || model || "unknown";
+    const modelDisplay = modelInfo?.displayName || model || "unknown";
+    const modelLimitTokens = modelInfo?.maxTokens ?? modelInfo?.contextTokens ?? null;
+    const modelPool = modelInfo?.pool || "api";
 
     const id = [
       dateTitle || dateLabel,
@@ -505,12 +710,17 @@
       type: typeLabel,
       typeDetail: typeTitle || typeLabel,
       model: model || "unknown",
+      modelKey,
+      modelDisplay,
+      modelLimitTokens,
+      modelPool,
       tokens,
       tokensText,
       cost,
       costText,
       isIncluded,
-      isError
+      isError,
+      planName
     };
   }
 
@@ -530,35 +740,80 @@
     return updated;
   }
 
-  function computeStats(records, activeSettings) {
-    const totals = { tokens: 0, cost: 0, requests: 0 };
+  function computeStats(records, activeSettings, planName) {
+    const totals = {
+      tokens: 0,
+      cost: 0,
+      estimatedCost: 0,
+      requests: 0,
+      hasEstimatedCost: false
+    };
     const modelStats = {};
     const timeline = {};
+    const poolTotals = {
+      api: { tokens: 0, estimatedCost: 0, hasEstimatedCost: false },
+      auto: { tokens: 0, estimatedCost: 0, hasEstimatedCost: false }
+    };
     let errorCount = 0;
     let includedTokens = 0;
 
     records.forEach((record) => {
       if (!record || !Number.isFinite(record.tokens)) return;
       totals.tokens += record.tokens;
-      totals.cost += record.cost || 0;
       totals.requests += 1;
 
       if (record.isError) errorCount += 1;
       if (record.isIncluded) includedTokens += record.tokens;
 
-      const model = record.model || "unknown";
-      if (!modelStats[model]) {
-        modelStats[model] = {
+      const modelKey = record.modelKey || record.model || "unknown";
+      const modelInfo = resolveModelDefinition(record.model || modelKey);
+      if (!modelStats[modelKey]) {
+        modelStats[modelKey] = {
+          displayName: record.modelDisplay || modelInfo?.displayName || modelKey,
           tokens: 0,
           cost: 0,
+          estimatedCost: 0,
           requests: 0,
-          estimatedCost: null
+          maxRequestTokens: 0,
+          limitTokens: record.modelLimitTokens ?? modelInfo?.maxTokens ?? modelInfo?.contextTokens ?? null,
+          remainingTokens: null,
+          limitPercent: null,
+          hasEstimatedCost: false,
+          pool: record.modelPool || modelInfo?.pool || "api"
         };
       }
 
-      modelStats[model].tokens += record.tokens;
-      modelStats[model].cost += record.cost || 0;
-      modelStats[model].requests += 1;
+      const stats = modelStats[modelKey];
+      stats.tokens += record.tokens;
+      stats.requests += 1;
+      stats.maxRequestTokens = Math.max(stats.maxRequestTokens, record.tokens);
+
+      const actualCost = record.cost || 0;
+      totals.cost += actualCost;
+      stats.cost += actualCost;
+
+      const estimatedCost = estimateRecordCost(record, activeSettings, modelInfo);
+      const effectiveCost = actualCost > 0 ? actualCost : estimatedCost;
+      if (Number.isFinite(effectiveCost)) {
+        totals.estimatedCost += effectiveCost;
+        stats.estimatedCost += effectiveCost;
+      }
+      if (actualCost <= 0 && Number.isFinite(estimatedCost)) {
+        totals.hasEstimatedCost = true;
+        stats.hasEstimatedCost = true;
+      }
+
+      const pool = stats.pool || "api";
+      if (!poolTotals[pool]) {
+        poolTotals[pool] = { tokens: 0, estimatedCost: 0, hasEstimatedCost: false };
+      }
+      poolTotals[pool].tokens += record.tokens;
+      if (Number.isFinite(effectiveCost)) {
+        poolTotals[pool].estimatedCost += effectiveCost;
+      }
+      if (actualCost <= 0 && Number.isFinite(estimatedCost)) {
+        poolTotals[pool].hasEstimatedCost = true;
+      }
 
       const dayKey = record.timestampMs
         ? new Date(record.timestampMs).toISOString().slice(0, 10)
@@ -568,27 +823,23 @@
       }
     });
 
-    Object.entries(modelStats).forEach(([model, stats]) => {
-      const price = Number(activeSettings?.pricingPer1M?.[model]);
-      if (Number.isFinite(price)) {
-        stats.estimatedCost = (stats.tokens / 1000000) * price;
+    Object.values(modelStats).forEach((stats) => {
+      stats.avgTokens = stats.requests ? stats.tokens / stats.requests : 0;
+      if (stats.limitTokens) {
+        stats.remainingTokens = Math.max(stats.limitTokens - stats.maxRequestTokens, 0);
+        stats.limitPercent = Math.min(stats.maxRequestTokens / stats.limitTokens, 1);
       }
     });
 
     const avgTokens = totals.requests ? totals.tokens / totals.requests : 0;
     const errorRate = totals.requests ? errorCount / totals.requests : 0;
-    const planLimit = Number(activeSettings?.planTokenLimit);
-    const plan = Number.isFinite(planLimit) && planLimit > 0
-      ? {
-          limit: planLimit,
-          used: includedTokens,
-          remainingTokens: Math.max(planLimit - includedTokens, 0),
-          percent: planLimit ? includedTokens / planLimit : 0,
-          remainingRequests: avgTokens
-            ? Math.max(planLimit - includedTokens, 0) / avgTokens
-            : null
-        }
-      : null;
+    const plan = buildPlanUsage({
+      includedTokens,
+      avgTokens,
+      planName,
+      poolTotals,
+      activeSettings
+    });
 
     return {
       totals,
@@ -673,6 +924,7 @@
     const merged = { ...DEFAULT_DATA, ...(value || {}) };
     merged.records = Array.isArray(merged.records) ? merged.records : [];
     merged.recordIds = isPlainObject(merged.recordIds) ? merged.recordIds : {};
+    merged.planName = typeof merged.planName === "string" ? merged.planName : "";
     return merged;
   }
 
@@ -696,6 +948,155 @@
     const isCollapsed = overlay.classList.contains("cut-collapsed");
     ui.toggleButton.textContent = isCollapsed ? "Maximize" : "Minimize";
     ui.toggleButton.setAttribute("aria-expanded", isCollapsed ? "false" : "true");
+  }
+
+  function extractRangeText(descriptionText) {
+    if (!descriptionText) return "";
+    const match = descriptionText.match(/from\s+(.+?)\s+to\s+([^.]+)/i);
+    if (match) {
+      return `${match[1].trim()} to ${match[2].trim()}`;
+    }
+    return descriptionText.trim();
+  }
+
+  function extractPlanName(value) {
+    if (!value) return "";
+    const match = value.match(/included in\s+([A-Za-z ]+)/i);
+    return match ? match[1].trim() : "";
+  }
+
+  function detectPlanName(records) {
+    const names = records.map((record) => record.planName).filter(Boolean);
+    if (!names.length) return "";
+    const counts = {};
+    names.forEach((name) => {
+      const key = normalizePlanName(name);
+      if (!key) return;
+      counts[key] = (counts[key] || 0) + 1;
+    });
+    const sorted = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+    if (!sorted.length) return "";
+    const normalized = sorted[0][0];
+    return names.find((name) => normalizePlanName(name) === normalized) || normalized;
+  }
+
+  function normalizePlanName(value) {
+    return value ? value.toLowerCase().replace(/\s+/g, " ").trim() : "";
+  }
+
+  function normalizeModelName(value) {
+    return value ? value.toLowerCase().replace(/\s+/g, "").trim() : "";
+  }
+
+  function resolveModelDefinition(modelName) {
+    const normalized = normalizeModelName(modelName);
+    if (!normalized) return null;
+    return (
+      MODEL_DEFINITIONS.find((definition) =>
+        definition.aliases.some((alias) => normalized.includes(normalizeModelName(alias)))
+      ) || null
+    );
+  }
+
+  function buildPlanUsage({ includedTokens, avgTokens, planName, poolTotals, activeSettings }) {
+    const planTokenLimit = Number(activeSettings?.planTokenLimit);
+    const autoTotals = poolTotals?.auto || { tokens: 0, estimatedCost: 0, hasEstimatedCost: false };
+    const apiTotals = poolTotals?.api || { tokens: 0, estimatedCost: 0, hasEstimatedCost: false };
+
+    if (Number.isFinite(planTokenLimit) && planTokenLimit > 0) {
+      return {
+        mode: "tokens",
+        planName,
+        limitTokens: planTokenLimit,
+        usedTokens: includedTokens,
+        remainingTokens: Math.max(planTokenLimit - includedTokens, 0),
+        percent: planTokenLimit ? includedTokens / planTokenLimit : 0,
+        remainingRequests: avgTokens
+          ? Math.max(planTokenLimit - includedTokens, 0) / avgTokens
+          : null,
+        autoTokens: autoTotals.tokens,
+        autoEstimatedCost: autoTotals.estimatedCost,
+        autoHasEstimated: autoTotals.hasEstimatedCost
+      };
+    }
+
+    const apiLimitUsd = getPlanLimitUsd(planName);
+    const apiUsedUsd = apiTotals.estimatedCost;
+    if (Number.isFinite(apiLimitUsd) && apiLimitUsd > 0) {
+      return {
+        mode: "usd",
+        planName,
+        apiLimitUsd,
+        apiUsedUsd,
+        apiRemainingUsd: Math.max(apiLimitUsd - apiUsedUsd, 0),
+        percent: apiLimitUsd ? apiUsedUsd / apiLimitUsd : 0,
+        apiTokens: apiTotals.tokens,
+        apiHasEstimated: apiTotals.hasEstimatedCost,
+        autoTokens: autoTotals.tokens,
+        autoEstimatedCost: autoTotals.estimatedCost,
+        autoHasEstimated: autoTotals.hasEstimatedCost
+      };
+    }
+
+    return {
+      mode: "unknown",
+      planName,
+      apiTokens: apiTotals.tokens,
+      apiUsedUsd,
+      apiHasEstimated: apiTotals.hasEstimatedCost,
+      autoTokens: autoTotals.tokens,
+      autoEstimatedCost: autoTotals.estimatedCost,
+      autoHasEstimated: autoTotals.hasEstimatedCost
+    };
+  }
+
+  function estimateRecordCost(record, activeSettings, modelInfo) {
+    if (!record || !Number.isFinite(record.tokens)) return null;
+    const override = findPricingOverride(activeSettings?.pricingPer1M, [
+      record.modelKey,
+      record.model,
+      record.modelDisplay,
+      modelInfo?.id
+    ]);
+    const pricePer1M = Number.isFinite(override)
+      ? override
+      : getBlendedPricePer1M(modelInfo?.pricing);
+    if (!Number.isFinite(pricePer1M)) return null;
+    return (record.tokens / 1000000) * pricePer1M;
+  }
+
+  function findPricingOverride(map, keys) {
+    if (!isPlainObject(map)) return null;
+    const lookup = {};
+    Object.entries(map).forEach(([key, value]) => {
+      lookup[normalizeModelName(key)] = value;
+    });
+    for (const key of keys) {
+      const normalized = normalizeModelName(key);
+      if (!normalized) continue;
+      if (Object.prototype.hasOwnProperty.call(lookup, normalized)) {
+        const numeric = Number(lookup[normalized]);
+        if (Number.isFinite(numeric)) return numeric;
+      }
+    }
+    return null;
+  }
+
+  function getBlendedPricePer1M(pricing) {
+    if (!pricing) return null;
+    const input = Number(pricing.input);
+    const output = Number(pricing.output);
+    if (Number.isFinite(input) && Number.isFinite(output)) {
+      return (input + output) / 2;
+    }
+    if (Number.isFinite(output)) return output;
+    if (Number.isFinite(input)) return input;
+    return null;
+  }
+
+  function getPlanLimitUsd(planName) {
+    const key = normalizePlanName(planName);
+    return key ? PLAN_API_LIMIT_USD[key] : null;
   }
 
   function setCollapsedState(collapsed) {
@@ -760,6 +1161,23 @@
   function formatCost(value) {
     if (!Number.isFinite(value)) return "$0.00";
     return `$${value.toFixed(2)}`;
+  }
+
+  function formatCostLabel(totals) {
+    if (!totals) return "$0.00";
+    if (totals.hasEstimatedCost && Number.isFinite(totals.estimatedCost)) {
+      return `~${formatCost(totals.estimatedCost)}`;
+    }
+    if (Number.isFinite(totals.cost) && totals.cost > 0) {
+      return formatCost(totals.cost);
+    }
+    return "$0.00";
+  }
+
+  function formatCostValue(value, isEstimated) {
+    if (!Number.isFinite(value)) return "$0.00";
+    const label = formatCost(value);
+    return isEstimated ? `~${label}` : label;
   }
 
   function formatRemainingRequests(value) {

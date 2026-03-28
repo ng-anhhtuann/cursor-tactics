@@ -111,12 +111,29 @@
   background: linear-gradient(90deg, #4dd3ff, #5a7bff);
 }
 
+.cut-plan-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: rgba(230, 233, 238, 0.95);
+}
+
+.cut-plan-secondary {
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  padding-top: 8px;
+}
+
 .cut-plan-meta {
   display: flex;
   justify-content: space-between;
   font-size: 11px;
   color: rgba(230, 233, 238, 0.7);
   margin-top: 6px;
+}
+
+.cut-plan-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 
 .cut-session-meta {
@@ -139,12 +156,13 @@
 
 .cut-table-row {
   display: grid;
-  grid-template-columns: minmax(0, 1.6fr) repeat(4, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1.5fr) 0.9fr 0.6fr 0.8fr minmax(0, 1.4fr);
   gap: 6px;
   font-size: 11px;
   padding: 6px 8px;
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.04);
+  align-items: center;
 }
 
 .cut-table-head {
@@ -156,6 +174,35 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.cut-limit-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.cut-limit-text {
+  font-size: 10px;
+  color: rgba(230, 233, 238, 0.8);
+}
+
+.cut-limit-remaining {
+  font-size: 10px;
+  color: rgba(230, 233, 238, 0.6);
+}
+
+.cut-limit-bar {
+  height: 6px;
+  width: 100%;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+
+.cut-limit-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #8bdcff, #5a7bff);
 }
 
 .cut-timeline {
