@@ -330,14 +330,16 @@
       return;
     }
 
-    data.rangeText = extractRangeText(parsed.rangeText);
+    const nextRangeText = extractRangeText(parsed.rangeText);
+    const rangeChanged = nextRangeText !== data.rangeText;
+    data.rangeText = nextRangeText;
     const detectedPlanName = detectPlanName(parsed.records);
     if (detectedPlanName) {
       data.planName = detectedPlanName;
     }
-    const didUpdate = mergeRecords(parsed.records);
-    data.lastUpdated = Date.now();
-    if (didUpdate || detectedPlanName) {
+    const didUpdate = setRecordsFromPage(parsed.records);
+    if (didUpdate || rangeChanged || detectedPlanName) {
+      data.lastUpdated = Date.now();
       await storageSet(DATA_KEY, data);
     }
     render();
@@ -435,11 +437,20 @@
 
   function render() {
     if (!ui) return;
-    const stats = computeStats(data.records, settings, data.planName);
+    const stats = computeStats(
+      data.records,
+      settings,
+      data.planName,
+      data.lastUpdated,
+      data.rangeText
+    );
+    lastStats = stats;
     const sessionStats = computeStats(
       data.records.filter((record) => sessionRecordIds.has(record.id)),
       settings,
-      data.planName
+      data.planName,
+      data.lastUpdated,
+      data.rangeText
     );
 
     const rangeText = data.rangeText ? data.rangeText.trim() : "";
@@ -448,13 +459,12 @@
     ui.totalTokens.textContent = formatCompactNumber(stats.totals.tokens);
     ui.totalCost.textContent = formatCostLabel(stats.totals);
     ui.totalRequests.textContent = formatNumber(stats.totals.requests);
-    ui.avgTokens.textContent = formatNumber(Math.round(stats.avgTokens || 0));
     ui.errorRate.textContent = `${Math.round((stats.errorRate || 0) * 100)}%`;
 
     renderPlan(stats.plan);
     renderSession(sessionStats);
     renderModels(stats.modelStats);
-    renderTimeline(stats.timeline);
+    renderTimeline(stats.weeklyTimeline);
     showStatus(
       stats.totals.requests
         ? `Tracking ${stats.totals.requests} requests.`
@@ -612,25 +622,38 @@
     });
   }
 
-  function renderTimeline(timeline) {
+  function renderTimeline(weeklyTimeline) {
     if (!ui) return;
     ui.timeline.innerHTML = "";
 
-    const entries = Object.entries(timeline).sort(([a], [b]) => a.localeCompare(b));
-    const recent = entries.slice(-7);
-    if (!recent.length) {
+    if (!weeklyTimeline || !weeklyTimeline.length) {
       ui.timeline.textContent = "No timeline data yet.";
       return;
     }
 
-    recent.forEach(([day, tokens]) => {
-      const row = document.createElement("div");
-      row.className = "cut-timeline-row";
-      row.innerHTML = `
-        <span>${formatDayLabel(day)}</span>
-        <span>${formatCompactNumber(tokens)}</span>
+    weeklyTimeline.forEach((week) => {
+      const isOpen = uiState.expandedWeeks.has(week.weekKey);
+      const wrapper = document.createElement("div");
+      wrapper.className = `cut-week ${isOpen ? "is-open" : ""}`;
+      wrapper.innerHTML = `
+        <button class="cut-week-toggle" data-action="toggle-week" data-week="${week.weekKey}" aria-expanded="${isOpen}">
+          <span>${week.label}</span>
+          <span>${formatCompactNumber(week.totalTokens)}</span>
+        </button>
+        <div class="cut-week-days">
+          ${week.days
+            .map((day) => {
+              return `
+                <div class="cut-week-day">
+                  <span>${formatDayLabel(day.dateKey)}</span>
+                  <span>${formatCompactNumber(day.tokens)}</span>
+                </div>
+              `;
+            })
+            .join("")}
+        </div>
       `;
-      ui.timeline.appendChild(row);
+      ui.timeline.appendChild(wrapper);
     });
   }
 
@@ -751,7 +774,36 @@
     return updated;
   }
 
-  function computeStats(records, activeSettings, planName) {
+  function setRecordsFromPage(records) {
+    const nextRecords = Array.isArray(records) ? records : [];
+    const nextIds = {};
+    nextRecords.forEach((record) => {
+      if (!record?.id) return;
+      nextIds[record.id] = true;
+      sessionRecordIds.add(record.id);
+    });
+
+    const hasChanged =
+      nextRecords.length !== data.records.length ||
+      hasRecordSetChanged(nextIds, data.recordIds);
+
+    data.records = nextRecords;
+    data.recordIds = nextIds;
+
+    return hasChanged;
+  }
+
+  function hasRecordSetChanged(nextIds, prevIds) {
+    const nextKeys = Object.keys(nextIds);
+    const prevKeys = Object.keys(prevIds || {});
+    if (nextKeys.length !== prevKeys.length) return true;
+    for (const key of nextKeys) {
+      if (!prevIds?.[key]) return true;
+    }
+    return false;
+  }
+
+  function computeStats(records, activeSettings, planName, lastUpdated, rangeText) {
     const totals = {
       tokens: 0,
       cost: 0,
@@ -826,9 +878,7 @@
         poolTotals[pool].hasEstimatedCost = true;
       }
 
-      const dayKey = record.timestampMs
-        ? new Date(record.timestampMs).toISOString().slice(0, 10)
-        : null;
+      const dayKey = getRecordDateKey(record);
       if (dayKey) {
         timeline[dayKey] = (timeline[dayKey] || 0) + record.tokens;
       }
@@ -851,11 +901,18 @@
       poolTotals,
       activeSettings
     });
+    const weeklyTimeline = getWeeklyTimeline(
+      timeline,
+      records.length,
+      lastUpdated,
+      parseRangeText(rangeText)
+    );
 
     return {
       totals,
       modelStats,
       timeline,
+      weeklyTimeline,
       avgTokens,
       errorRate,
       plan
@@ -865,6 +922,7 @@
   async function resetData() {
     data = { ...DEFAULT_DATA };
     sessionRecordIds.clear();
+    weeklyTimelineCache = { key: null, data: null };
     await storageSet(DATA_KEY, data);
     render();
   }
@@ -946,12 +1004,22 @@
 
   function applyUiState(state) {
     if (!overlay) return;
+    uiState.expandedWeeks = new Set(
+      Array.isArray(state?.expandedWeeks) ? state.expandedWeeks : []
+    );
     setCollapsedState(Boolean(state?.collapsed));
+    if (Number.isFinite(state?.width)) {
+      applyOverlayWidth(state.width);
+    }
   }
 
   function saveUiState() {
     if (!overlay) return;
-    storageSet(UI_KEY, { collapsed: overlay.classList.contains("cut-collapsed") });
+    storageSet(UI_KEY, {
+      collapsed: overlay.classList.contains("cut-collapsed"),
+      width: getOverlayWidth(),
+      expandedWeeks: Array.from(uiState.expandedWeeks)
+    });
   }
 
   function updateToggleButtonLabel() {
@@ -1110,10 +1178,228 @@
     return key ? PLAN_API_LIMIT_USD[key] : null;
   }
 
+  function getWeeklyTimeline(timeline, recordCount, lastUpdated, range) {
+    const rangeKey = range ? `${range.startKey}:${range.endKey}` : "all";
+    const key = `${recordCount}:${lastUpdated || 0}:${rangeKey}`;
+    if (weeklyTimelineCache.key === key && weeklyTimelineCache.data) {
+      return weeklyTimelineCache.data;
+    }
+    const grouped = groupTimelineByWeek(timeline, range);
+    weeklyTimelineCache = { key, data: grouped };
+    return grouped;
+  }
+
+  function groupTimelineByWeek(timeline, range) {
+    const entries = Object.entries(timeline || {}).filter(([, tokens]) =>
+      Number.isFinite(tokens)
+    );
+    if (!entries.length) return [];
+
+    const rangeFiltered = range
+      ? entries.filter(([dateKey]) => isDateWithinRange(dateKey, range))
+      : entries;
+    if (!rangeFiltered.length) return [];
+
+    const monthKey = range?.endKey?.slice(0, 7) || getLatestMonthKey(rangeFiltered);
+    const monthEntries = monthKey
+      ? rangeFiltered.filter(([dateKey]) => dateKey.startsWith(monthKey))
+      : rangeFiltered;
+    if (!monthEntries.length) return [];
+
+    const weeks = {};
+    monthEntries.forEach(([dateKey, tokens]) => {
+      const weekKey = getWeekStartKey(dateKey);
+      if (!weeks[weekKey]) {
+        weeks[weekKey] = {
+          weekKey,
+          totalTokens: 0,
+          days: [],
+          minDate: null,
+          maxDate: null
+        };
+      }
+      weeks[weekKey].totalTokens += tokens;
+      weeks[weekKey].days.push({ dateKey, tokens });
+      const date = parseDateKey(dateKey);
+      if (!weeks[weekKey].minDate || date < weeks[weekKey].minDate) {
+        weeks[weekKey].minDate = date;
+      }
+      if (!weeks[weekKey].maxDate || date > weeks[weekKey].maxDate) {
+        weeks[weekKey].maxDate = date;
+      }
+    });
+
+    return Object.values(weeks)
+      .map((week) => {
+        week.label = formatWeekLabel(week.minDate, week.maxDate);
+        week.days.sort((a, b) => b.dateKey.localeCompare(a.dateKey));
+        return week;
+      })
+      .sort((a, b) => b.weekKey.localeCompare(a.weekKey));
+  }
+
+  function getWeekStartKey(dateKey) {
+    const date = parseDateKey(dateKey);
+    const day = date.getDay();
+    const offset = (day + 6) % 7;
+    date.setDate(date.getDate() - offset);
+    return formatDateKey(date);
+  }
+
+  function parseRangeText(rangeText) {
+    if (!rangeText) return null;
+    const parts = rangeText.split(" to ").map((value) => value.trim());
+    if (parts.length !== 2) return null;
+    const start = new Date(parts[0]);
+    const end = new Date(parts[1]);
+    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return null;
+    const normalizedStart = stripTime(start);
+    const normalizedEnd = stripTime(end);
+    const [from, to] =
+      normalizedStart <= normalizedEnd ? [normalizedStart, normalizedEnd] : [normalizedEnd, normalizedStart];
+    return {
+      start: from,
+      end: to,
+      startKey: formatDateKey(from),
+      endKey: formatDateKey(to)
+    };
+  }
+
+  function stripTime(date) {
+    return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  }
+
+  function isDateWithinRange(dateKey, range) {
+    if (!range) return true;
+    const date = parseDateKey(dateKey);
+    if (Number.isNaN(date.getTime())) return false;
+    return date >= range.start && date <= range.end;
+  }
+
+  function getLatestMonthKey(entries) {
+    if (!entries.length) return "";
+    const latest = entries.reduce(
+      (current, [dateKey]) => (dateKey > current ? dateKey : current),
+      entries[0][0]
+    );
+    return latest.slice(0, 7);
+  }
+
+  function getRecordDateKey(record) {
+    if (Number.isFinite(record?.timestampMs)) {
+      return formatDateKey(new Date(record.timestampMs));
+    }
+    const fallback = record?.timestamp || record?.dateLabel || "";
+    const parsed = Date.parse(fallback);
+    if (Number.isNaN(parsed)) return null;
+    return formatDateKey(new Date(parsed));
+  }
+
+  function parseDateKey(dateKey) {
+    return new Date(`${dateKey}T00:00:00`);
+  }
+
+  function formatDateKey(date) {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, "0");
+    const day = String(date.getDate()).padStart(2, "0");
+    return `${year}-${month}-${day}`;
+  }
+
+  function addDays(date, days) {
+    const next = new Date(date.getTime());
+    next.setDate(next.getDate() + days);
+    return next;
+  }
+
+  function formatWeekLabel(startDate, endDate) {
+    const start = formatMonthDay(startDate);
+    const end = formatMonthDay(endDate);
+    return `${start} - ${end}`;
+  }
+
+  function formatMonthDay(date) {
+    const month = date.toLocaleDateString(undefined, { month: "short" });
+    const day = String(date.getDate()).padStart(2, "0");
+    return `${month} ${day}`;
+  }
+
   function setCollapsedState(collapsed) {
     if (!overlay) return;
     overlay.classList.toggle("cut-collapsed", collapsed);
     updateToggleButtonLabel();
+  }
+
+  function toggleWeek(weekKey) {
+    if (!weekKey) return;
+    if (uiState.expandedWeeks.has(weekKey)) {
+      uiState.expandedWeeks.delete(weekKey);
+    } else {
+      uiState.expandedWeeks.add(weekKey);
+    }
+    saveUiState();
+    renderTimeline(lastStats?.weeklyTimeline || []);
+  }
+
+  function bindResizeHandle() {
+    if (!ui?.resizeHandle) return;
+    ui.resizeHandle.addEventListener("mousedown", onResizeMouseDown);
+    ui.resizeHandle.addEventListener("touchstart", onResizeTouchStart, { passive: false });
+  }
+
+  function unbindResizeHandle() {
+    if (!ui?.resizeHandle) return;
+    ui.resizeHandle.removeEventListener("mousedown", onResizeMouseDown);
+    ui.resizeHandle.removeEventListener("touchstart", onResizeTouchStart);
+  }
+
+  function onResizeMouseDown(event) {
+    event.preventDefault();
+    startResize(event.clientX);
+  }
+
+  function onResizeTouchStart(event) {
+    event.preventDefault();
+    const touch = event.touches[0];
+    if (!touch) return;
+    startResize(touch.clientX, true);
+  }
+
+  function startResize(startX, isTouch = false) {
+    if (!overlay) return;
+    const startWidth = getOverlayWidth() || overlay.offsetWidth;
+    const onMove = (moveEvent) => {
+      const clientX = isTouch ? moveEvent.touches?.[0]?.clientX : moveEvent.clientX;
+      if (!Number.isFinite(clientX)) return;
+      const delta = startX - clientX;
+      const targetWidth = startWidth + delta;
+      applyOverlayWidth(targetWidth);
+    };
+    const onEnd = () => {
+      document.removeEventListener(isTouch ? "touchmove" : "mousemove", onMove);
+      document.removeEventListener(isTouch ? "touchend" : "mouseup", onEnd);
+      document.removeEventListener(isTouch ? "touchcancel" : "mouseup", onEnd);
+      document.body.style.userSelect = "";
+      saveUiState();
+    };
+    document.body.style.userSelect = "none";
+    document.addEventListener(isTouch ? "touchmove" : "mousemove", onMove, { passive: false });
+    document.addEventListener(isTouch ? "touchend" : "mouseup", onEnd, { passive: false });
+    document.addEventListener(isTouch ? "touchcancel" : "mouseup", onEnd, { passive: false });
+  }
+
+  function applyOverlayWidth(width) {
+    if (!overlay || !Number.isFinite(width)) return;
+    const minWidth = 300;
+    const maxWidth = Math.max(minWidth, window.innerWidth - 32);
+    const clamped = Math.min(Math.max(width, minWidth), maxWidth);
+    overlay.style.width = `${Math.round(clamped)}px`;
+  }
+
+  function getOverlayWidth() {
+    if (!overlay) return null;
+    const width = Number.parseFloat(overlay.style.width);
+    return Number.isFinite(width) ? width : null;
   }
 
   function matchesPattern(url, pattern) {
@@ -1198,9 +1484,9 @@
 
   function formatDayLabel(value) {
     if (!value) return "";
-    const date = new Date(value);
+    const date = parseDateKey(value);
     if (Number.isNaN(date.getTime())) return value;
-    return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+    return formatMonthDay(date);
   }
 
   function formatRelativeTime(timestamp) {
