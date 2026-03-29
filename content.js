@@ -109,6 +109,9 @@
   let currentUrl = location.href;
   const sessionRecordIds = new Set();
   const sessionStartedAt = Date.now();
+  const uiState = { expandedWeeks: new Set() };
+  let lastStats = null;
+  let weeklyTimelineCache = { key: null, data: null };
 
   init().catch((error) => {
     console.error("[Cursor Usage Tracker] init failed:", error);
@@ -219,10 +222,6 @@
             <div class="cut-value" data-cut-total-requests>0</div>
           </div>
           <div class="cut-metric">
-            <div class="cut-label">Avg tokens</div>
-            <div class="cut-value" data-cut-avg-tokens>0</div>
-          </div>
-          <div class="cut-metric">
             <div class="cut-label">Error rate</div>
             <div class="cut-value" data-cut-error-rate>0%</div>
           </div>
@@ -240,7 +239,7 @@
           <div class="cut-table" data-cut-models></div>
         </div>
         <div class="cut-section">
-          <div class="cut-section-title">Timeline (last 7 days)</div>
+          <div class="cut-section-title">Timeline (by week)</div>
           <div class="cut-timeline" data-cut-timeline></div>
         </div>
         <div class="cut-section cut-actions-row">
@@ -249,6 +248,7 @@
           <button class="cut-button cut-button-danger" data-action="reset" type="button">Reset</button>
         </div>
       </div>
+      <div class="cut-resize-handle" data-cut-resize-handle></div>
     `;
 
     document.body.appendChild(overlay);
@@ -259,33 +259,44 @@
       totalTokens: overlay.querySelector("[data-cut-total-tokens]"),
       totalCost: overlay.querySelector("[data-cut-total-cost]"),
       totalRequests: overlay.querySelector("[data-cut-total-requests]"),
-      avgTokens: overlay.querySelector("[data-cut-avg-tokens]"),
       errorRate: overlay.querySelector("[data-cut-error-rate]"),
       plan: overlay.querySelector("[data-cut-plan]"),
       session: overlay.querySelector("[data-cut-session]"),
       models: overlay.querySelector("[data-cut-models]"),
       timeline: overlay.querySelector("[data-cut-timeline]"),
-      toggleButton: overlay.querySelector('[data-action="toggle"]')
+      toggleButton: overlay.querySelector('[data-action="toggle"]'),
+      resizeHandle: overlay.querySelector("[data-cut-resize-handle]")
     };
+    bindResizeHandle();
     applyUiStateFromStorage();
   }
 
   function teardownOverlay() {
     if (!overlay) return;
     overlay.removeEventListener("click", onOverlayClick);
+    unbindResizeHandle();
     overlay.remove();
     overlay = null;
     ui = null;
   }
 
   function onOverlayClick(event) {
-    const action = event.target?.dataset?.action;
+    const actionTarget = event.target?.closest?.("[data-action]");
+    const action = actionTarget?.dataset?.action;
     if (!action) return;
 
     if (action === "toggle") {
       const isCollapsed = overlay.classList.contains("cut-collapsed");
       setCollapsedState(!isCollapsed);
       saveUiState();
+      return;
+    }
+
+    if (action === "toggle-week") {
+      const weekKey = actionTarget?.dataset?.week;
+      if (weekKey) {
+        toggleWeek(weekKey);
+      }
       return;
     }
 
