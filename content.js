@@ -19,7 +19,7 @@
 
   const PLAN_API_LIMIT_USD = {
     "pro": 20,
-    "pro plus": 70,
+    "pro plus": 60,
     "ultra": 400
   };
 
