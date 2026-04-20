@@ -643,10 +643,12 @@
         <div class="cut-week-days">
           ${week.days
             .map((day) => {
+              const hasUsage = day.tokens > 0;
+              const cls = hasUsage ? "cut-week-day" : "cut-week-day cut-week-day-empty";
               return `
-                <div class="cut-week-day">
+                <div class="${cls}">
                   <span>${formatDayLabel(day.dateKey)}</span>
-                  <span>${formatCompactNumber(day.tokens)}</span>
+                  <span>${hasUsage ? formatCompactNumber(day.tokens) : "—"}</span>
                 </div>
               `;
             })
@@ -1190,52 +1192,56 @@
   }
 
   function groupTimelineByWeek(timeline, range) {
-    const entries = Object.entries(timeline || {}).filter(([, tokens]) =>
-      Number.isFinite(tokens)
-    );
-    if (!entries.length) return [];
-
-    const rangeFiltered = range
-      ? entries.filter(([dateKey]) => isDateWithinRange(dateKey, range))
-      : entries;
-    if (!rangeFiltered.length) return [];
-
-    const monthKey = range?.endKey?.slice(0, 7) || getLatestMonthKey(rangeFiltered);
-    const monthEntries = monthKey
-      ? rangeFiltered.filter(([dateKey]) => dateKey.startsWith(monthKey))
-      : rangeFiltered;
-    if (!monthEntries.length) return [];
-
-    const weeks = {};
-    monthEntries.forEach(([dateKey, tokens]) => {
-      const weekKey = getWeekStartKey(dateKey);
-      if (!weeks[weekKey]) {
-        weeks[weekKey] = {
-          weekKey,
-          totalTokens: 0,
-          days: [],
-          minDate: null,
-          maxDate: null
-        };
-      }
-      weeks[weekKey].totalTokens += tokens;
-      weeks[weekKey].days.push({ dateKey, tokens });
-      const date = parseDateKey(dateKey);
-      if (!weeks[weekKey].minDate || date < weeks[weekKey].minDate) {
-        weeks[weekKey].minDate = date;
-      }
-      if (!weeks[weekKey].maxDate || date > weeks[weekKey].maxDate) {
-        weeks[weekKey].maxDate = date;
+    const tokenLookup = {};
+    Object.entries(timeline || {}).forEach(([dateKey, tokens]) => {
+      if (Number.isFinite(tokens)) {
+        tokenLookup[dateKey] = (tokenLookup[dateKey] || 0) + tokens;
       }
     });
 
-    return Object.values(weeks)
-      .map((week) => {
-        week.label = formatWeekLabel(week.minDate, week.maxDate);
-        week.days.sort((a, b) => b.dateKey.localeCompare(a.dateKey));
-        return week;
-      })
-      .sort((a, b) => b.weekKey.localeCompare(a.weekKey));
+    const now = new Date();
+    const today = stripTime(now);
+    const year = now.getFullYear();
+    const month = now.getMonth();
+
+    const firstOfMonth = new Date(year, month, 1);
+    const firstMonday = new Date(firstOfMonth);
+    const dow = firstMonday.getDay();
+    firstMonday.setDate(firstMonday.getDate() - ((dow + 6) % 7));
+
+    const weeks = [];
+    let cursor = new Date(firstMonday);
+
+    while (cursor <= today) {
+      const weekStart = new Date(cursor);
+      const weekEndFull = addDays(weekStart, 6);
+      const clampedStart = weekStart < firstOfMonth ? firstOfMonth : weekStart;
+      const clampedEnd = weekEndFull > today ? today : weekEndFull;
+      const weekKey = formatDateKey(weekStart);
+
+      const days = [];
+      let totalTokens = 0;
+      let d = new Date(clampedStart);
+      while (d <= clampedEnd) {
+        const dateKey = formatDateKey(d);
+        const tokens = tokenLookup[dateKey] || 0;
+        days.push({ dateKey, tokens });
+        totalTokens += tokens;
+        d = addDays(d, 1);
+      }
+
+      weeks.push({
+        weekKey,
+        label: `${formatMonthDay(clampedStart)} - ${formatMonthDay(clampedEnd)}`,
+        totalTokens,
+        days
+      });
+
+      cursor = addDays(cursor, 7);
+    }
+
+    weeks.sort((a, b) => b.weekKey.localeCompare(a.weekKey));
+    return weeks;
   }
 
   function getWeekStartKey(dateKey) {
@@ -1486,7 +1492,8 @@
     if (!value) return "";
     const date = parseDateKey(value);
     if (Number.isNaN(date.getTime())) return value;
-    return formatMonthDay(date);
+    const dayName = date.toLocaleDateString(undefined, { weekday: "short" });
+    return `${dayName}, ${formatMonthDay(date)}`;
   }
 
   function formatRelativeTime(timestamp) {
